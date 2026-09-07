@@ -101,8 +101,7 @@ both versions survive on every machine.
 
 | Key / env                        | Default      | Meaning                                              |
 | -------------------------------- | ------------ | ---------------------------------------------------- |
-| `endpoint` / `OMP_SYNC_ENDPOINT` | — (required) | Storage endpoint incl. scheme                        |
-| `bucket` / `OMP_SYNC_BUCKET`     | — (required) | Bucket name (must already exist)                     |
+| `endpoint` / `OMP_SYNC_ENDPOINT` | — (required) | Storage endpoint incl. scheme. If the endpoint's first host label equals the bucket name (e.g. bucket `s3` with `https://s3.example.com`), embed the bucket in the host instead to force virtual-hosted addressing |
 | `region` / `OMP_SYNC_REGION`     | `auto`       | SigV4 region                                         |
 | `accessKeyId/secretAccessKey`    | — (required) | Storage credentials                                  |
 | `prefix` / `OMP_SYNC_PREFIX`     | `omp-sync/`  | Bucket namespace for all objects                     |

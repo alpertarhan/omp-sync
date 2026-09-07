@@ -284,7 +284,7 @@ export async function loadRemoteManifest(
   key: Buffer,
 ): Promise<{ manifest: Manifest; etag?: string } | null> {
   const objectKey = manifestObjectKey(prefix);
-  const got = await s3.getObject(objectKey);
+  const got = await s3.getObject(objectKey, { maxBytes: MANIFEST_MAX_BYTES });
   if (!got) return null;
   // AAD binds the manifest to its object key: a manifest copied from another
   // prefix under the same encryption key is rejected instead of redirecting
@@ -294,6 +294,25 @@ export async function loadRemoteManifest(
   ) as Manifest;
   if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.entries)) {
     throw new Error("remote manifest has an unknown shape");
+  }
+  // Entry-shape validation: a hostile or foreign writer's malformed entry
+  // must fail loudly here, not degrade into TypeErrors deep inside pull
+  // (e.g. NaN mtime reaching utimes after the file was already written).
+  for (const [i, e] of manifest.entries.entries()) {
+    if (
+      !e ||
+      typeof e !== "object" ||
+      typeof e.id !== "string" ||
+      !e.id.startsWith("sessions/") ||
+      typeof e.key !== "string" ||
+      !/^[0-9a-f]{64}$/.test(e.sha256) ||
+      !Number.isFinite(e.size) ||
+      !Number.isFinite(e.mtime) ||
+      (e.cwd !== null && typeof e.cwd !== "string") ||
+      typeof e.canonical !== "string"
+    ) {
+      throw new Error(`remote manifest entry ${i} has an invalid shape — refusing the whole manifest`);
+    }
   }
   return { manifest, etag: got.etag };
 }

@@ -140,7 +140,7 @@ test("scoped push replaces only the uploaded id in the manifest", async () => {
     await saveRemoteManifest(
       store,
       "t/",
-      { version: 1, updatedAt: 1, entries: [ent(idR, "rr", `t/sessions/${CANON_A}/rr`), ent(idC, "remote-diverged")] },
+      { version: 1, updatedAt: 1, entries: [ent(idR, "1".repeat(64), `t/sessions/${CANON_A}/rr`), ent(idC, "2".repeat(64))] },
       KEY,
     );
     markSynced(a.dir, [{ id: idC, sha256: "base-diverged" }]); // true conflict: base matches neither side
@@ -151,8 +151,8 @@ test("scoped push replaces only the uploaded id in the manifest", async () => {
     const m = await readManifest(store, "t/");
     const byId = new Map(m?.entries.map((e) => [e.id, e.sha256]));
     // Untouched ids pass through verbatim — the conflict is NOT resolved behind our back.
-    expect(byId.get(idR)).toBe("rr");
-    expect(byId.get(idC)).toBe("remote-diverged");
+    expect(byId.get(idR)).toBe("1".repeat(64));
+    expect(byId.get(idC)).toBe("2".repeat(64));
     expect(byId.has(idN)).toBe(true);
     // Base gains only the uploaded id; the pre-existing entry is preserved.
     const uploadedSha = byId.get(idN);
@@ -428,7 +428,7 @@ test("orphan HEAD errors keep the entry", async () => {
     await saveRemoteManifest(
       store,
       "t/",
-      { version: 1, updatedAt: 1, entries: [{ id: idR, key: keyR, sha256: "old", size: 1, mtime: 1, cwd: CWDA, canonical: CANON_A }] },
+      { version: 1, updatedAt: 1, entries: [{ id: idR, key: keyR, sha256: "3".repeat(64), size: 1, mtime: 1, cwd: CWDA, canonical: CANON_A }] },
       KEY,
     );
     store.failOnHead.add(keyR);
@@ -449,12 +449,12 @@ test("manifest CAS retry preserves disjoint fresh ids", async () => {
   const idX = lid("x.jsonl");
   const ent = (id: string, sha256: string, key?: string) => ({ id, key: key ?? `obj/${sha256}`, sha256, size: 1, mtime: 1, cwd: CWDA, canonical: CANON_A });
   // Winner's generation: Y already at v2.
-  await saveRemoteManifest(store, "t/", { version: 1, updatedAt: 1, entries: [ent(idY, "v2")] }, KEY);
+  await saveRemoteManifest(store, "t/", { version: 1, updatedAt: 1, entries: [ent(idY, "b".repeat(64))] }, KEY);
   // Our stale view (built before the winner): Y still at v1, plus our new X.
   await saveRemoteManifest(
     store,
     "t/",
-    { version: 1, updatedAt: 0, entries: [ent(idY, "v1"), ent(idX, "new")] },
+    { version: 1, updatedAt: 0, entries: [ent(idY, "a".repeat(64)), ent(idX, "4".repeat(64))] },
     KEY,
     '"stale-etag"',
     3,
@@ -462,8 +462,8 @@ test("manifest CAS retry preserves disjoint fresh ids", async () => {
   );
   const m = await readManifest(store, "t/");
   const byId = new Map(m?.entries.map((e) => [e.id, e.sha256]));
-  expect(byId.get(idY)).toBe("v2"); // winner's disjoint update survives
-  expect(byId.get(idX)).toBe("new"); // our owned id lands
+  expect(byId.get(idY)).toBe("b".repeat(64)); // winner's disjoint update survives
+  expect(byId.get(idX)).toBe("4".repeat(64)); // our owned id lands
 });
 
 test("pull with unresolvable blobs writes nothing and records nothing", async () => {
@@ -650,4 +650,23 @@ test("sessionsRoot follows omp's XDG redirection", () => {
     else process.env.XDG_DATA_HOME = saved;
     rmSync(xdg, { recursive: true, force: true });
   }
+});
+
+test("malformed manifest entries are refused at load", async () => {
+  const store = new FakeS3();
+  const mk = (entries: unknown[]): Buffer =>
+    seal(Buffer.from(JSON.stringify({ version: 1, updatedAt: 1, entries })), KEY, Buffer.from("t/manifest.json", "utf-8")).body;
+  const put = async (entries: unknown[]): Promise<void> => {
+    await store.putObject("t/manifest.json", mk(entries));
+  };
+  await put([{ id: "sessions/x/a.jsonl", key: "k", sha256: "nothex", size: 1, mtime: 1, cwd: null, canonical: "c" }]);
+  await expect(loadRemoteManifest(store, "t/", KEY)).rejects.toThrow(/invalid shape/);
+  await put([{ id: "not-sessions/a", key: "k", sha256: "a".repeat(64), size: 1, mtime: 1, cwd: null, canonical: "c" }]);
+  await expect(loadRemoteManifest(store, "t/", KEY)).rejects.toThrow(/invalid shape/);
+  await put([{ id: "sessions/x/a.jsonl", key: "k", sha256: "a".repeat(64), size: 1, mtime: NaN, cwd: null, canonical: "c" }]);
+  await expect(loadRemoteManifest(store, "t/", KEY)).rejects.toThrow(/invalid shape/);
+  // Well-formed still loads.
+  await put([{ id: "sessions/x/a.jsonl", key: "k", sha256: "a".repeat(64), size: 1, mtime: 1, cwd: "/h", canonical: "c" }]);
+  const ok = await loadRemoteManifest(store, "t/", KEY);
+  expect(ok?.manifest.entries.length).toBe(1);
 });

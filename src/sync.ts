@@ -457,7 +457,7 @@ export async function pullSync({ agentDir, cfg, skipAbsPaths, store }: PullOptio
   const ko = keyOptions(paths, cfg);
   for (const e of d.toPull) {
     try {
-      const got = await s3.getObject(e.key);
+      const got = await s3.getObject(e.key, { maxBytes: SESSION_MAX_BYTES });
       if (!got) {
         report.errors.push(`pull ${e.id}: 404`);
         continue;
@@ -529,7 +529,7 @@ export async function pullSync({ agentDir, cfg, skipAbsPaths, store }: PullOptio
   // local session file and syncs up on the next push like any other file.
   for (const c of d.conflicts) {
     try {
-      const got = await s3.getObject(c.remote.key);
+      const got = await s3.getObject(c.remote.key, { maxBytes: SESSION_MAX_BYTES });
       if (!got) {
         report.errors.push(`conflict ${c.remote.key}: 404`);
         continue;
@@ -646,7 +646,7 @@ async function pullBlobsFor(
       /* missing -> download */
     }
     try {
-      const got = await s3.getObject(objectKey);
+      const got = await s3.getObject(objectKey, { maxBytes: cfg.maxBlobBytes });
       if (!got) {
         report.errors.push(`blob ${h}: referenced by a session but missing remotely`);
         continue;
@@ -714,7 +714,7 @@ export async function syncBlobs(agentDir: string, cfg: SyncConfig, store?: Objec
     if (localSet.has(h)) continue;
     const objectKey = blobObjectKey(cfg.prefix, h);
     try {
-      const got = await s3.getObject(objectKey);
+      const got = await s3.getObject(objectKey, { maxBytes: cfg.maxBlobBytes });
       if (!got) continue;
       const plain = await openBounded({ body: got.body }, encKey, cfg.maxBlobBytes, ENC_UTF8(objectKey));
       if (sha256hex(plain) !== h) {

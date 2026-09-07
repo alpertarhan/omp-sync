@@ -37,7 +37,7 @@ export class EtagMismatchError extends Error {
  */
 export interface ObjectStore {
   putObject(key: string, body: Buffer, contentType?: string, opts?: { ifMatch?: string; ifNoneMatch?: boolean }): Promise<{ etag?: string }>;
-  getObject(key: string): Promise<{ body: Buffer; etag?: string } | null>;
+  getObject(key: string, opts?: { maxBytes?: number }): Promise<{ body: Buffer; etag?: string } | null>;
   headObject(key: string): Promise<{ size: number; etag?: string } | null>;
   listObjects(prefix: string): Promise<{ key: string; size: number }[]>;
   ping(): Promise<boolean>;
@@ -60,6 +60,47 @@ function encodePath(p: string): string {
 function encodeQueryVal(v: string): string {
   return encodeURIComponent(v).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
+
+export interface SignatureParams {
+  method: string;
+  /** Already-encoded canonical path. */
+  path: string;
+  /** Already-encoded canonical query string (empty string for none). */
+  canonicalQuery: string;
+  /** All headers to sign, keyed lowercase; ordering is applied here. */
+  headers: Record<string, string>;
+  bodyHash: string;
+  amzdate: string;
+  region: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+}
+
+/**
+ * Pure SigV4 authorization-header computation. Split out so the exact
+ * canonical-request assembly and key-derivation chain can be pinned against
+ * AWS's published test vectors independent of network plumbing.
+ */
+export function computeSignature(p: SignatureParams): { auth: string; signature: string } {
+  const datestamp = p.amzdate.slice(0, 8);
+  const sortedHeaders = Object.entries(p.headers).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const canonicalHeaders = sortedHeaders.map(([k, v]) => `${k}:${v.trim()}\n`).join("");
+  const signedHeaders = sortedHeaders.map(([k]) => k).join(";");
+
+  const canonicalRequest = [p.method, p.path, p.canonicalQuery, canonicalHeaders, signedHeaders, p.bodyHash].join("\n");
+  const scope = `${datestamp}/${p.region}/s3/aws4_request`;
+  const stringToSign = ["AWS4-HMAC-SHA256", p.amzdate, scope, sha256(canonicalRequest)].join("\n");
+
+  const kDate = hmac(`AWS4${p.secretAccessKey}`, datestamp);
+  const kRegion = hmac(kDate, p.region);
+  const kService = hmac(kRegion, "s3");
+  const kSigning = hmac(kService, "aws4_request");
+  const signature = createHmac("sha256", kSigning).update(stringToSign).digest("hex");
+
+  const auth = `AWS4-HMAC-SHA256 Credential=${p.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  return { auth, signature };
+}
+
 
 /** Decode the (few) XML entities S3 may emit inside <Key>. */
 function decodeXmlEntities(s: string): string {
@@ -100,7 +141,6 @@ export class S3 {
     } = {},
   ): Promise<Response> {
     const amzdate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
-    const datestamp = amzdate.slice(0, 8);
     const bodyHash = opts.body ? sha256(opts.body) : sha256("");
 
     const path = this.bucketPrefix === "" && key === "" ? "/" : `${this.bucketPrefix}/${encodePath(key)}`;
@@ -116,22 +156,17 @@ export class S3 {
     if (opts.ifNoneMatch) headers["if-none-match"] = "*";
     if (opts.ifMatch) headers["if-match"] = opts.ifMatch;
 
-    const sortedHeaders = Object.entries(headers).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    const canonicalHeaders = sortedHeaders.map(([k, v]) => `${k}:${v.trim()}\n`).join("");
-    const signedHeaders = sortedHeaders.map(([k]) => k).join(";");
-
-    const canonicalRequest = [method, path, canonicalQuery, canonicalHeaders, signedHeaders, bodyHash].join("\n");
-
-    const scope = `${datestamp}/${this.cfg.region}/s3/aws4_request`;
-    const stringToSign = ["AWS4-HMAC-SHA256", amzdate, scope, sha256(canonicalRequest)].join("\n");
-
-    const kDate = hmac(`AWS4${this.cfg.secretAccessKey}`, datestamp);
-    const kRegion = hmac(kDate, this.cfg.region);
-    const kService = hmac(kRegion, "s3");
-    const kSigning = hmac(kService, "aws4_request");
-    const signature = createHmac("sha256", kSigning).update(stringToSign).digest("hex");
-
-    const auth = `AWS4-HMAC-SHA256 Credential=${this.cfg.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    const { auth } = computeSignature({
+      method,
+      path,
+      canonicalQuery,
+      headers,
+      bodyHash,
+      amzdate,
+      region: this.cfg.region,
+      accessKeyId: this.cfg.accessKeyId,
+      secretAccessKey: this.cfg.secretAccessKey,
+    });
     const url = `${this.base}${path}${canonicalQuery ? `?${canonicalQuery}` : ""}`;
 
     try {
@@ -165,12 +200,17 @@ export class S3 {
   /**
    * GET one object with its ETag. The ETag belongs to exactly these bytes
    * (same response), so manifest concurrency never pairs a HEAD generation
-   * with a GET generation.
+   * with a GET generation. When maxBytes is given and the server announces
+   * a larger content-length, the body is refused BEFORE it is buffered.
    */
-  async getObject(key: string): Promise<{ body: Buffer; etag?: string } | null> {
+  async getObject(key: string, opts: { maxBytes?: number } = {}): Promise<{ body: Buffer; etag?: string } | null> {
     const r = await this.signed("GET", key);
     if (r.status === 404) return null;
     if (!r.ok) throw new Error(`GET ${key} failed: ${r.status} ${await r.text()}`);
+    const declared = Number(r.headers.get("content-length") ?? "");
+    if (opts.maxBytes !== undefined && Number.isFinite(declared) && declared > opts.maxBytes) {
+      throw new Error(`GET ${key}: declared ${declared} bytes exceeds limit (${opts.maxBytes}) — download aborted before buffering`);
+    }
     return { body: Buffer.from(await r.arrayBuffer()), etag: r.headers.get("etag") ?? undefined };
   }
 

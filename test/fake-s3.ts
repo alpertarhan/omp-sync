@@ -31,7 +31,10 @@ export class FakeS3 implements ObjectStore {
     return { etag };
   }
 
-  async getObject(key: string): Promise<{ body: Buffer; etag?: string } | null> {
+  async getObject(
+    key: string,
+    _opts: { maxBytes?: number } = {},
+  ): Promise<{ body: Buffer; etag?: string } | null> {
     this.gets++;
     if (this.failOnGet.has(key)) throw new Error(`injected GET failure: ${key}`);
     const cur = this.objects.get(key);
