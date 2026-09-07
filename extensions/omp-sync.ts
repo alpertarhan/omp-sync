@@ -245,6 +245,16 @@ export default function ompSyncExtension(pi: ExtensionAPI): void {
   // Shutdown: push the current file only. The 2s handler budget forbids a
   // full sync here by design; turn_end already carries the steady state.
   pi.on("session_shutdown", (_event, ctx) => {
+    // The host clears unfired managed timers on shutdown; entries in the
+    // debounce map would otherwise pin their contexts forever. Sweep all.
+    for (const [file, entry] of pending) {
+      try {
+        entry.ctx.clearTimer(entry.timer);
+      } catch {
+        /* already fired or cleared */
+      }
+      pending.delete(file);
+    }
     let agentDir: string;
     let cfg: SyncConfig;
     try {

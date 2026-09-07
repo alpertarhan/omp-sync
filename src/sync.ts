@@ -103,10 +103,30 @@ export function resolveAgentDir(host?: { getAgentDir?: () => string }): string {
   return omp;
 }
 
+/**
+ * Resolve the sessions root the way omp does: when XDG_DATA_HOME is set and
+ * omp's XDG data dir ($XDG_DATA_HOME/omp) already exists, omp keeps sessions
+ * under it — a hardcoded <agentDir>/sessions would read/write a tree the
+ * host never discovers. Probe once per call; fall back to the default.
+ */
+function ompSessionsRoot(agentDir: string): string {
+  const xdg = process.env.XDG_DATA_HOME?.trim();
+  if (xdg && xdg.startsWith("/")) {
+    const candidate = join(xdg, "omp");
+    try {
+      if (statSync(join(candidate, "sessions")).isDirectory()) return join(candidate, "sessions");
+      if (statSync(candidate).isDirectory()) return join(candidate, "sessions");
+    } catch {
+      /* omp not XDG-redirected here */
+    }
+  }
+  return join(agentDir, "sessions");
+}
+
 export function agentPaths(agentDir: string): AgentPaths {
   return {
     agentDir,
-    sessionsRoot: join(agentDir, "sessions"),
+    sessionsRoot: ompSessionsRoot(agentDir),
     blobsRoot: join(agentDir, "blobs"),
     home: homedir(),
     tmpdir: tmpdir(),
@@ -586,7 +606,11 @@ async function pushBlobsFor(
       continue;
     }
     if (raw.length > cfg.maxBlobBytes) {
-      report.errors.push(`blob ${h}: ${raw.length} bytes exceeds maxBlobBytes (${cfg.maxBlobBytes}), skipped`);
+      // Over-cap is a policy outcome, not a failure: warn and keep going so
+      // the session still publishes. Machines pulling it will refuse the
+      // session with an explicit missing-oversized-blob error instead of
+      // wedging this push forever.
+      report.warnings.push(`blob ${h}: ${raw.length} bytes exceeds maxBlobBytes (${cfg.maxBlobBytes}) — not uploaded; raise the limit to sync its sessions`);
       continue;
     }
     try {

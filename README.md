@@ -70,7 +70,7 @@ omp plugin install npm:omp-sync
 
 | Command              | What it does                                                       |
 | -------------------- | ------------------------------------------------------------------ |
-| `/omp-sync status`   | Local vs remote diff. Read-only.                                   |
+| `/omp-sync status`   | Local vs remote diff. Never writes sessions or remote objects (a one-time local base-state migration may run after upgrades). |
 | `/omp-sync push`     | Upload new/changed local sessions (last-writer-wins on first contact). |
 | `/omp-sync pull`     | Download remote sessions (never touches your open session file).   |
 | `/omp-sync blobs`    | Full two-way reconcile of the attachment blob store.               |
@@ -110,7 +110,7 @@ both versions survive on every machine.
 | `autoPull` / `OMP_SYNC_AUTO_PULL` | `false`     | Pull other sessions on startup                       |
 | `debounceMs`                     | `5000`       | Turn-end push debounce                               |
 | `includeBlobs` / `OMP_SYNC_BLOBS` | `true`      | Sync `blob:sha256:` attachments alongside sessions   |
-| `maxBlobBytes`                   | `33554432`   | Blobs larger than this are skipped with a warning    |
+| `maxBlobBytes`                   | `33554432`   | Oversized blobs are skipped with a warning on push; sessions referencing them fail to pull until the limit is raised |
 | `pathMap` / `OMP_SYNC_PATHMAP`   | `[]`         | `[{from, to}]` prefix rewrites for differing home dirs |
 | `OMP_SYNC_ENCRYPTION_KEY`        | — (required) | Base64 of 32 random bytes, shared across machines    |
 | `OMP_SYNC_TIMEOUT_MS`            | `15000`      | Per-request network timeout                          |
@@ -125,8 +125,9 @@ both versions survive on every machine.
 - **Manifest** (`<prefix>manifest.json`, itself sealed) is a truthful index
   of remote objects, updated with `If-Match` optimistic concurrency and
   bounded retries — concurrent pushes merge instead of clobbering.
-- **Pulls** land in `<agentDir>/sessions/<omp bucket>/`, the only tree omp
-  discovers. Project working directories are never written to.
+- **Pulls** land in omp's own sessions tree (`<agentDir>/sessions/<omp
+  bucket>/`, or `$XDG_DATA_HOME/omp/sessions/...` when omp is
+  XDG-redirected). Project working directories are never written to.
 - **Deletions never propagate**: the store is additive; deleting locally and
   pushing does not delete remotely.
 
@@ -136,7 +137,9 @@ both versions survive on every machine.
   object; session, blob, and manifest envelopes are each bound (AAD) to
   their object key, so swapped or cross-prefix objects are rejected.
 - The storage operator sees only opaque blobs, content hashes, sizes, and
-  modification times — never prompts, code, or file contents.
+  modification times — never prompts, code, or file contents (note: object
+  keys do reveal the sanitized project directory layout and per-object
+  sizes, which are listable).
 - Downloads are hash-verified and size-bounded before they reach disk;
   oversized or mismatched objects are refused, never partially applied.
 - Credentials live in `omp-sync.local.json` / env on each machine.

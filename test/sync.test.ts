@@ -14,7 +14,7 @@ import { FakeS3 } from "./fake-s3.js";
 import { loadLocalState, loadRemoteManifest, markSynced, saveRemoteManifest } from "../src/store.js";
 import { bucketDirForCwd, canonicalProjectKey, sessionLogicalId, sessionObjectKey } from "../src/keys.js";
 import { open, seal } from "../src/crypto.js";
-import { pullSync, pushSync, revalidateLocal, snapshotIdentity, syncBlobs, type SyncConfig } from "../src/sync.js";
+import { agentPaths, pullSync, pushSync, revalidateLocal, snapshotIdentity, syncBlobs, type SyncConfig } from "../src/sync.js";
 
 const HOME = homedir();
 const TMP = tmpdir();
@@ -596,5 +596,58 @@ test("revalidateLocal matrix", () => {
     expect(revalidateLocal(abs, scanned)).toMatch(/changed/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("oversized blob warns but never blocks the manifest", async () => {
+  const a = makeAgent();
+  try {
+    const cfg = makeCfg({ maxBlobBytes: 16 });
+    const store = new FakeS3();
+    const raw = Buffer.from("this-blob-is-definitely-over-sixteen-bytes");
+    const h = sha(raw);
+    mkdirSync(a.blobs, { recursive: true });
+    writeFileSync(join(a.blobs, h), raw);
+    writeSession(a.sessions, "-dev-x", "f.jsonl", CWDA, `pic blob:sha256:${h}`);
+    const r = await pushSync({ agentDir: a.dir, cfg, store });
+    // Session publishes; the blob becomes a warning, not an error.
+    expect(r.errors).toEqual([]);
+    expect(r.pushed).toBe(1);
+    expect(r.warnings.some((w) => w.includes("exceeds maxBlobBytes"))).toBe(true);
+    expect(store.keys()).toContain("t/manifest.json");
+    expect(store.keys()).not.toContain(`t/blobs/${h}`);
+    expect(loadLocalState(a.dir).lastSynced[lid("f.jsonl")]).toBeDefined();
+    // And the second push does not wedge: clean no-op (the unchanged
+    // session no longer re-walks the blob).
+    const r2 = await pushSync({ agentDir: a.dir, cfg, store });
+    expect(r2.errors).toEqual([]);
+    expect(r2.pushed).toBe(0);
+    // Raising the cap and touching nothing else still uploads the blob
+    // through the explicit blobs command — the escape hatch works.
+    const repair = await syncBlobs(a.dir, makeCfg(), store);
+    expect(repair.errors).toEqual([]);
+    expect(repair.blobsPushed).toBe(1);
+  } finally {
+    wipe(a);
+  }
+});
+
+test("sessionsRoot follows omp's XDG redirection", () => {
+  const saved = process.env.XDG_DATA_HOME;
+  const xdg = mkdtempSync(join(tmpdir(), "xdg-"));
+  try {
+    // No XDG: default agent tree.
+    delete process.env.XDG_DATA_HOME;
+    expect(agentPaths("/tmp/agent").sessionsRoot).toBe(join("/tmp/agent", "sessions"));
+    // XDG set but omp's dir absent: still the default.
+    process.env.XDG_DATA_HOME = xdg;
+    expect(agentPaths("/tmp/agent").sessionsRoot).toBe(join("/tmp/agent", "sessions"));
+    // XDG set and $XDG_DATA_HOME/omp exists: redirected root.
+    mkdirSync(join(xdg, "omp", "sessions"), { recursive: true });
+    expect(agentPaths("/tmp/agent").sessionsRoot).toBe(join(xdg, "omp", "sessions"));
+  } finally {
+    if (saved === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = saved;
+    rmSync(xdg, { recursive: true, force: true });
   }
 });
