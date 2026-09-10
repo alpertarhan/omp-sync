@@ -110,7 +110,7 @@ both versions survive on every machine.
 | `debounceMs`                     | `5000`       | Turn-end push debounce                               |
 | `includeBlobs` / `OMP_SYNC_BLOBS` | `true`      | Sync `blob:sha256:` attachments alongside sessions   |
 | `maxBlobBytes`                   | `33554432`   | Oversized blobs are skipped with a warning on push; sessions referencing them fail to pull until the limit is raised |
-| `pathMap` / `OMP_SYNC_PATHMAP`   | `[]`         | `[{from, to}]` prefix rewrites for differing home dirs |
+| `pathMap` / `OMP_SYNC_PATHMAP`   | `[]`         | `[{from, to}]` prefix rewrites for trees that differ beyond the home root (home shapes `/Users/u`, `/home/u`, `/root` reconcile automatically) |
 | `OMP_SYNC_ENCRYPTION_KEY`        | — (required) | Base64 of 32 random bytes, shared across machines    |
 | `OMP_SYNC_TIMEOUT_MS`            | `15000`      | Per-request network timeout                          |
 
@@ -118,7 +118,9 @@ both versions survive on every machine.
 
 - **Keys** derive from the session header's `cwd`, never from the on-disk
   bucket directory (which is lossy). Two omp machines converge on the same
-  keys for the same project, across macOS and Linux.
+  keys for the same project, across macOS and Linux: any POSIX home shape
+  (`/Users/u/...`, `/home/u/...`, `/root/...`) folds to `home/...`
+  regardless of which machine encoded it, username included or not.
 - **Change tracking** is sha256-of-plaintext plus a local agreed-base, with
   mtime tie-breaking only on first contact.
 - **Manifest** (`<prefix>manifest.json`, itself sealed) is a truthful index

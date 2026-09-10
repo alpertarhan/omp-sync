@@ -33,6 +33,33 @@ test("outside paths are absolute-encoded", () => {
   expect(canonicalProjectKey("/data/proj", o)).toBe("abs/data/proj");
 });
 
+test("foreign home shapes converge across mac/linux", () => {
+  const mac = { home: "/Users/ersin", tmpdir: "/private/tmp" };
+  const lin = { home: "/home/ersin", tmpdir: "/tmp" };
+  // A mac-born session rescanned on linux and vice versa: same key, no pathMap.
+  expect(canonicalProjectKey("/Users/ersin/Projects/acme", lin)).toBe("home/Projects/acme");
+  expect(canonicalProjectKey("/home/ersin/Projects/acme", mac)).toBe("home/Projects/acme");
+  // Usernames are irrelevant; foreign home roots map to bare home; /root too.
+  expect(canonicalProjectKey("/home/someone-else/x", mac)).toBe("home/x");
+  expect(canonicalProjectKey("/Users/ersin", lin)).toBe("home");
+  expect(canonicalProjectKey("/root/x", lin)).toBe("home/x");
+});
+
+test("home-shaped non-home paths stay absolute", () => {
+  expect(canonicalProjectKey("/homebrew/x", o)).toBe("abs/homebrew/x");
+  expect(canonicalProjectKey("/homex/y", o)).toBe("abs/homex/y");
+});
+
+test("logical id survives the mac/linux round trip", () => {
+  const mac = { home: "/Users/ersin", tmpdir: "/private/tmp" };
+  const lin = { home: "/home/ersin", tmpdir: "/tmp" };
+  // Regression: a pulled file keeps its foreign header cwd, so the rescan
+  // used to diverge to abs/... and push/pull-loop the same session forever.
+  const pushed = sessionLogicalId(canonicalProjectKey("/Users/ersin/Projects/acme", mac), "x.jsonl");
+  const rescanned = sessionLogicalId(canonicalProjectKey("/Users/ersin/Projects/acme", lin), "x.jsonl");
+  expect(rescanned).toBe(pushed);
+});
+
 test("pathMap normalizes foreign cwds into the local vocabulary", () => {
   // A mac-authored cwd arriving on a linux box with a different home:
   // the map folds it under the local home so both sides converge.
@@ -68,6 +95,14 @@ test("bucket dir mirrors omp encoding (tmp + absolute)", () => {
 test("bucket dir honors pathMap before encoding", () => {
   const lin = { home: "/home/alper", tmpdir: "/tmp", pathMap: [{ from: "/Users/alper/", to: "/home/alper/" }], canonicalize: false };
   expect(bucketDirForCwd("/Users/alper/dev/bengu", lin)).toBe("-dev-bengu");
+});
+
+test("bucket dir folds a foreign home cwd into the native bucket", () => {
+  const lin = { home: "/home/ersin", tmpdir: "/tmp", canonicalize: false };
+  expect(bucketDirForCwd("/Users/ersin/Projects/acme", lin)).toBe("-Projects-acme");
+  const mac = { home: "/Users/ersin", tmpdir: "/private/tmp", canonicalize: false };
+  expect(bucketDirForCwd("/home/ersin/Projects/acme", mac)).toBe("-Projects-acme");
+  expect(bucketDirForCwd("/root/x", mac)).toBe("-x");
 });
 
 test("logical ids are stable, object keys are content-addressed", () => {

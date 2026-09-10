@@ -126,6 +126,41 @@ test("push uploads sessions, seals the manifest, records base, idempotent", asyn
   }
 });
 
+test("cross-machine round trip: foreign home cwd keeps one stable id (mac <-> linux)", async () => {
+  const mac = makeAgent();
+  const lin = makeAgent();
+  try {
+    const store = new FakeS3();
+    const cfg = makeCfg();
+    // Session born on the "mac" under /Users/ersin — foreign to every other
+    // machine's $HOME. No pathMap: convergence must be automatic.
+    writeSession(mac.sessions, "-Projects-acme", "f1.jsonl", "/Users/ersin/Projects/acme", "mac-side");
+    const r1 = await pushSync({ agentDir: mac.dir, cfg, store });
+    expect(r1.errors).toEqual([]);
+    expect(r1.pushed).toBe(1);
+    // The "linux" machine pulls: the file lands in the native home bucket
+    // (where omp looks for the equivalent local project), header cwd verbatim.
+    const r2 = await pullSync({ agentDir: lin.dir, cfg, store });
+    expect(r2.errors).toEqual([]);
+    expect(r2.pulled).toBe(1);
+    expect(readdirSync(lin.sessions)).toEqual(["-Projects-acme"]);
+    expect(readFileSync(join(lin.sessions, "-Projects-acme", "f1.jsonl"), "utf-8")).toContain("mac-side");
+    // Rescan + push from the pulling machine: the foreign header cwd must
+    // re-encode to the SAME logical id — no quarantine bucket, no duplicate
+    // abs/... entry, no push/pull loop.
+    const r3 = await pushSync({ agentDir: lin.dir, cfg, store });
+    expect(r3.errors).toEqual([]);
+    expect(r3.pushed).toBe(0);
+    expect(r3.upToDate).toBe(1);
+    expect(readdirSync(lin.sessions)).toEqual(["-Projects-acme"]);
+    const m = await readManifest(store, "t/");
+    expect(m?.entries.map((e) => e.id)).toEqual(["sessions/home/Projects/acme/f1.jsonl"]);
+  } finally {
+    wipe(mac);
+    wipe(lin);
+  }
+});
+
 test("scoped push replaces only the uploaded id in the manifest", async () => {
   const a = makeAgent();
   try {

@@ -7,7 +7,10 @@
  * identity, so any two omp machines converge on the same keys for the
  * same project.
  *
- * Canonical project key: `home/<rel>` | `tmp/<rel>` | `abs/<sanitized>`.
+ * Canonical project key: `home/<rel>` | `tmp/<rel>` | `abs/<sanitized>`,
+ * where `home/` covers both local $HOME and foreign POSIX home shapes
+ * (`/Users/<u>`, `/home/<u>`, `/root`) so sessions stay identical across
+ * mac↔linux sync.
  * Object layout under the bucket prefix:
  *   <prefix>sessions/<canonical>/<filename>.enc
  *   <prefix>blobs/<sha256hex>
@@ -65,8 +68,14 @@ function sanitizeSegment(seg: string): string {
 
 /**
  * Canonical project key for a session cwd. Deterministic across mac/linux
- * for anything under $HOME; temp-root and absolute paths stay host-shaped
- * (documented: they cannot be reconciled across OSes).
+ * for anything under $HOME — including a FOREIGN home shape: session files
+ * travel verbatim, so a cwd written on macOS (`/Users/u/...`) must encode
+ * identically when the file is rescanned on Linux (`/home/u/...` local
+ * home) and vice versa. Relying on the local $HOME alone breaks that round
+ * trip: the foreign shape falls to `abs/...` and the logical id diverges,
+ * so every pull re-pushes as a "new" session forever. Temp-root and other
+ * absolute paths stay host-shaped (documented: they cannot be reconciled
+ * across OSes).
  */
 export function canonicalProjectKey(cwd: string, opts: KeyOptions): string {
   const mapped = applyPathMap(cwd, opts.pathMap);
@@ -80,9 +89,26 @@ export function canonicalProjectKey(cwd: string, opts: KeyOptions): string {
     const segs = tmpRel === "" ? [] : tmpRel.split("/").map(sanitizeSegment);
     return ["tmp", ...segs].join("/");
   }
+  const foreignHome = foreignHomeRelative(mapped);
+  if (foreignHome !== null) {
+    const segs = foreignHome === "" ? [] : foreignHome.split("/").map(sanitizeSegment);
+    return ["home", ...segs].join("/");
+  }
   const stripped = slash(mapped).replace(/^\/+/, "");
   const segs = stripped === "" ? [] : stripped.split("/").map(sanitizeSegment);
   return ["abs", ...segs].join("/");
+}
+
+/**
+ * Home-relative part of a cwd that uses a STANDARD POSIX home root other
+ * than this machine's: `/Users/<u>/rest`, `/home/<u>/rest`, `/root/rest`
+ * (username dropped — it already is for local-home paths). Purely a
+ * function of the path string, so every machine classifies the same cwd
+ * identically. Returns null when the path is not home-shaped.
+ */
+export function foreignHomeRelative(p: string): string | null {
+  const m = slash(p).match(/^\/(?:Users\/[^/]+|home\/[^/]+|root)(?:\/(.*))?$/);
+  return m ? (m[1] ?? "") : null;
 }
 
 export interface BucketOptions extends KeyOptions {
@@ -104,6 +130,11 @@ function canonicalize(p: string, enabled: boolean): string {
  * encoder (session-paths.ts): `-<home-relative>`, `-tmp-<temp-relative>`,
  * `--<absolute>--` otherwise, with `[/\\:]` folded to `-`.
  *
+ * A cwd from another machine's home (`/Users/u/...` seen on Linux, or the
+ * reverse) folds into the same `-<home-relative>` bucket omp itself uses
+ * for the equivalent local project, so pulled sessions sit next to native
+ * ones instead of accumulating in `--Users-u-...--` quarantine dirs.
+ *
  * Pulls ALWAYS land under <sessionsRoot>/<bucketDir> — the only tree omp
  * discovers sessions from. Never the project working directory.
  */
@@ -120,6 +151,8 @@ export function bucketDirForCwd(cwd: string, opts: BucketOptions): string {
   if (tmpRel === "" || (!tmpRel.startsWith("..") && !isAbsolute(tmpRel))) {
     return tmpRel === "" ? "-tmp" : `-tmp-${tmpRel.replace(/[/\\:]/g, "-")}`;
   }
+  const foreignHome = foreignHomeRelative(canon);
+  if (foreignHome !== null) return `-${foreignHome.replace(/[/\\:]/g, "-")}`;
   return `--${slash(canon).replace(/^\/+/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
